@@ -1,0 +1,138 @@
+-- Создаем таблицы для дальнешего наполнения (только те, которые будем использовать в запросе)
+
+-- lineitem (убрано партицирование из исходного DDL, чтобы добавить его потом и сравнить время выборки)
+CREATE TABLE if not exists lineitem (
+    L_ORDERKEY BIGINT,
+    L_PARTKEY INT,
+    L_SUPPKEY INT,
+    L_LINENUMBER INTEGER,
+    L_QUANTITY DECIMAL(15, 2),
+    L_EXTENDEDPRICE DECIMAL(15, 2),
+    L_DISCOUNT DECIMAL(15, 2),
+    L_TAX DECIMAL(15, 2),
+    L_RETURNFLAG CHAR(1),
+    L_LINESTATUS CHAR(1),
+    L_SHIPDATE DATE,
+    L_COMMITDATE DATE,
+    L_RECEIPTDATE DATE,
+    L_SHIPINSTRUCT CHAR(25),
+    L_SHIPMODE CHAR(10),
+    L_COMMENT VARCHAR(44)
+) WITH (
+    appendonly = true,
+    orientation = column,
+    compresstype = ZSTD
+) 
+DISTRIBUTED BY (L_ORDERKEY, L_LINENUMBER) 
+
+-- orders
+CREATE TABLE if not exists orders (
+    O_ORDERKEY BIGINT,
+    O_CUSTKEY INT,
+    O_ORDERSTATUS CHAR(1),
+    O_TOTALPRICE DECIMAL(15, 2),
+    O_ORDERDATE DATE,
+    O_ORDERPRIORITY CHAR(15),
+    O_CLERK CHAR(15),
+    O_SHIPPRIORITY INTEGER,
+    O_COMMENT VARCHAR(79)
+) WITH (
+    appendonly = true,
+    orientation = column,
+    compresstype = ZSTD
+) 
+DISTRIBUTED BY (O_ORDERKEY) 
+PARTITION BY RANGE (O_ORDERDATE) 
+    (start('1992-01-01') INCLUSIVE end ('1998-12-31') INCLUSIVE every (30), default partition others);
+
+-- customer
+CREATE TABLE if not exists customer (
+    C_CUSTKEY INT,
+    C_NAME VARCHAR(25),
+    C_ADDRESS VARCHAR(40),
+    C_NATIONKEY INTEGER,
+    C_PHONE CHAR(15),
+    C_ACCTBAL DECIMAL(15, 2),
+    C_MKTSEGMENT CHAR(10),
+    C_COMMENT VARCHAR(117)
+) WITH (appendonly = true, orientation = column) 
+DISTRIBUTED BY (C_CUSTKEY);
+
+-- данные в таблицы были загружены не полностью, так как загрузка занимает очень много времени через интерфейс dbeaver. 
+-- Эксперимент проведен на сэмпле.
+
+explain analyse
+SELECT customer.C_NAME, 
+       lineitem.L_QUANTITY,
+       lineitem.L_TAX
+FROM lineitem JOIN orders on (lineitem.L_ORDERKEY = orders.O_ORDERKEY)
+              JOIN customer on (orders.O_CUSTKEY = customer.C_CUSTKEY)
+where L_SHIPDATE = '1992-01-01'
+      and O_ORDERPRIORITY = '5-LOW'
+-- Получившееся время - Execution time: 25.704 ms. 
+
+-- так как в Greenplum нельзя сделать непартицированную таблицу партицированной, создаем новую таблицу
+-- добавление партиции по дате для lineitem
+CREATE TABLE lineitem_partitioned (LIKE lineitem)
+PARTITION BY RANGE (L_SHIPDATE) 
+    (start('1992-01-01') INCLUSIVE end ('1998-12-31') INCLUSIVE every (30), default partition others);
+
+INSERT INTO lineitem_partitioned SELECT * FROM lineitem;
+
+DROP TABLE lineitem;
+
+ALTER TABLE lineitem_partitioned RENAME TO lineitem;
+
+-- замер времени с добавленной партицией L_SHIPDATE
+explain analyse
+SELECT customer.C_NAME, 
+       supplier.S_NAME,
+       lineitem.L_QUANTITY,
+       lineitem.L_TAX
+FROM lineitem JOIN orders on (lineitem.L_ORDERKEY = orders.O_ORDERKEY)
+              JOIN customer on (orders.O_CUSTKEY = customer.C_CUSTKEY)
+              JOIN supplier on (lineitem.L_SUPPKEY = supplier.S_SUPPKEY)
+where L_SHIPDATE = '1992-01-01'
+      and O_ORDERPRIORITY = '5-LOW'
+-- Получившееся время - Execution time: 20.286 ms
+
+-- добавление партиции по O_ORDERPRIORITY в orders
+CREATE TABLE orders_partitioned (LIKE orders)
+PARTITION BY LIST (O_ORDERPRIORITY)
+    (PARTITION urgent VALUES ('1-URGENT'),
+     PARTITION high VALUES ('2-HIGH'),
+     PARTITION medium VALUES ('3-MEDIUM'),
+     PARTITION not_specified VALUES ('4-NOT SPECIFIED'),
+     PARTITION low VALUES ('5-LOW'),
+     DEFAULT PARTITION other);
+
+INSERT INTO orders_partitioned SELECT * FROM orders;
+
+DROP TABLE orders;
+
+ALTER TABLE orders_partitioned RENAME TO orders;
+
+Распределение по колонке O_ORDERPRIORITY довольно равномерное. Фильтр по данному полю также выглядит логичным.
+O_ORDERPRIORITY COUNT(*)
+2-HIGH         	2025
+4-NOT SPECIFIED	2031
+1-URGENT       	1994
+3-MEDIUM       	1984
+5-LOW          	1966
+
+-- замер времени с добавленной партицией L_SHIPDATE и O_ORDERPRIORITY
+explain analyse
+SELECT customer.C_NAME, 
+       supplier.S_NAME,
+       lineitem.L_QUANTITY,
+       lineitem.L_TAX
+FROM lineitem JOIN orders on (lineitem.L_ORDERKEY = orders.O_ORDERKEY)
+              JOIN customer on (orders.O_CUSTKEY = customer.C_CUSTKEY)
+              JOIN supplier on (lineitem.L_SUPPKEY = supplier.S_SUPPKEY)
+where L_SHIPDATE = '1992-01-01' 
+      and O_ORDERPRIORITY = '5-LOW'
+-- Получившееся время - Execution time: 4.476 ms
+
+Итог:
+Добавление партиции L_SHIPDATE почти не повлияло на время выполнения.
+А вот O_ORDERPRIORITY сократило его в разы.
