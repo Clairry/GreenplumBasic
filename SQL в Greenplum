@@ -58,8 +58,7 @@ CREATE TABLE if not exists customer (
 ) WITH (appendonly = true, orientation = column) 
 DISTRIBUTED BY (C_CUSTKEY);
 
--- данные в таблицы были загружены не полностью, так как загрузка занимает очень много времени через интерфейс dbeaver. 
--- Эксперимент проведен на сэмпле.
+-- Делаем выборку без партицирования
 
 explain analyse
 SELECT customer.C_NAME, 
