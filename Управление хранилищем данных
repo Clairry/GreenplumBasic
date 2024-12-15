@@ -1,0 +1,261 @@
+-- Кластер Greenplum развернут в Docker контейнере. Эксперименты велись через интерфейс DBeaver.
+
+-- Откроем два активных соединения и попробуем разные транзакционные действия.
+-- Начнем с уровня изоляции read committed.
+
+-- Сессия 1:
+set transaction isolation level read committed;
+begin;
+	create table test_table_rc (id integer, description varchar(255));
+	
+	select * from test_table_rc;
+    -- таблица существует, вывод при select есть
+
+
+-- Сессия 2:
+set transaction isolation level read committed;
+begin;
+	
+	select * from test_table_rc;
+    -- транзакция в сессии 1 не завершена, таблицу не видит
+
+-- Сессия 1:
+--  завершим транзакцию:
+ end;   
+
+-- Сессия 2:
+-- таблица все еще не видна, работаем с тем, что было на момент начала транзакции
+--  завершим транзакцию:
+ end;   
+
+ -- таблица существует, вывод при select есть
+
+ -- Попробуем поизменять данные в транзакциях.
+set transaction isolation level read committed;
+begin;
+
+insert into test_table_rc values (1, 'desc1'), (2, 'desc2');
+
+select * from test_table_rc;
+-- select видит 1 и 2
+
+-- Сессия 2:
+set transaction isolation level read committed;
+begin;
+	
+	select * from test_table_rc;
+    -- транзакция в сессии 1 не завершена, новые значения не видит
+
+    insert into test_table_rc values (3, 'desc3'), (4, 'desc4');
+    -- select видит 3 и 4
+
+-- Сессия 1:
+--  завершим транзакцию:
+ end;  
+ -- select видит 1 и 2
+
+--  Сессия 2:
+  -- select видит 1, 2, 3, 4
+
+ --  Сессия 2:
+--  завершим транзакцию:
+ end;  
+   -- select видит 1, 2, 3, 4 
+
+-- Теперь попробуем update
+
+-- Сессия 1:
+set transaction isolation level read committed;
+begin; 
+update test_table_rc set description = 'desc4 new' where id = 4;
+
+-- видим обновленные данные
+
+-- Сессия 2:
+
+set transaction isolation level read committed;
+begin;
+-- не видим обновленные данные
+update test_table_rc set description = 'desc44 new' where id = 4;	
+-- запрос висит до завершения транзакции в сессии 1. После обновляет данные
+end;
+-- При завершении транзакции видим 'desc44 new' для id = 4
+
+-- Теперь попробуем уровень изоляции serializable.
+
+drop table test_table_rc;
+
+-- Сессия 1:
+set transaction isolation level serializable;
+begin;
+	create table test_table_rc (id integer, description varchar(255));
+	
+	select * from test_table_rc;
+    -- таблица существует, вывод при select есть
+
+
+-- Сессия 2:
+set transaction isolation level serializable;
+begin;
+	
+	select * from test_table_rc;
+    -- транзакция в сессии 1 не завершена, таблицу не видит
+
+-- Сессия 1:
+--  завершим транзакцию:
+ end;   
+
+-- Сессия 2:
+-- таблица все еще не видна
+--  завершим транзакцию:
+ end;   
+
+ -- таблица существует, вывод при select есть
+
+--  Попробуем поизменять данные в транзакциях.
+set transaction isolation level serializable;
+begin;
+
+insert into test_table_rc values (5, 'desc5'), (6, 'desc6');
+
+select * from test_table_rc;
+-- select видит 5 и 6
+
+-- Сессия 2:
+set transaction isolation level serializable;
+begin;
+	
+	select * from test_table_rc;
+    -- транзакция в сессии 1 не завершена, новые значения не видит
+
+-- Сессия 1:
+--  завершим транзакцию:
+ end;  
+ -- select видит 5 и 6
+
+--  Сессия 2:
+  -- select видит 5 и 6
+
+--   Сессия 2:
+--  завершим транзакцию:
+ end;  
+   -- select видит 5 и 6 
+
+-- Теперь попробуем update
+
+-- Сессия 1:
+set transaction isolation level serializable;
+begin; 
+update test_table_rc set description = 'desc4 new' where id = 4;
+
+-- видим обновленные данные
+
+-- Сессия 2:
+
+set transaction isolation level serializable;
+begin;
+-- не видим обновленные данные
+update test_table_rc set description = 'desc44 new' where id = 4;	
+-- запрос висит до завершения транзакции в сессии 1. После обновляет данные. 
+-- При этом в сессии 1 данные еще старые 'desc4 new'
+end;
+-- При завершении транзакции видим 'desc44 new' для id = 4 в обеих сессиях
+
+-- Создание таблиц
+/*Сначала сформулируем задачу. Допустим, мы - компания, которая производит и поставляет в ритейл безглютеновые продукты.
+Посмотрим на организацию хранения некоторых данных.
+
+У нас есть номенклатура продаваемых товаров. Их не очень много, в пределах 2000. 
+Так как их не много, можно разложить по сегментам.
+Номенклатура меняется довольно редко, зато сжатие будет полезно, чтобы не занимать место на сегментах.
+Также сделаем колоночное хранение, так как нам граммовка не всегда будет интересна в запросах.*/
+
+create table products (
+    product_id int,
+    product_name varchar(100),
+    product_weight numeric,
+    price numeric
+)
+WITH (
+    appendoptimized = true,
+    compresstype = zstd,
+    compresslevel = 1,
+    orientation = column
+)
+DISTRIBUTED replicated;
+
+-- Добавим таблицу с нашими покупателями. 
+-- Их у нас много, так как сотрудничаем мы как с крупными ритейлерами, так и с небольшими магазинами (ИП в том числе)
+
+create table customers (
+    customer_id int,
+    c_name varchar(100),
+    c_inn varchar(12),
+    c_address varchar(100),
+    c_segment varchar(30)
+)
+WITH (
+    appendoptimized = true,
+    compresstype = zstd,
+    compresslevel = 1,
+    orientation = column
+)
+distributed by (customer_id);
+
+/*Теперь нам нужно добавить таблицу с платежками по закупкам. Тут у нас есть вопрос: крупные ритейлы закупают сильно больше.
+А аналитика нам будет интересна в разрезе кастомеров. Но интересно сравнивать в рамках одного сегмента: крупные с крупными, мелкие с мелкими.
+Новый крупный ритейл появляется редко. Поэтому обновление сегмента - редкость.
+Можно разделить таблицу с платежками на две и сделать дистрибуцию по кастомеру.
+Тогда не будет перекоса между кастомерами из разных сегментов.
+Товаров у нас немного, и они раскиданы на все сегменты, поэтому по товару дистрибуция не нужна.
+Мы работаем с 2010 года, старые данные нам нужны редко, пока что сложим их в годовые партиции.
+В основном нам аналитика нужна за последний год в разрезе месяцев.
+*/
+
+create table transactions_small (
+    transaction_id int,
+    customer_id int,
+    product_id int,
+    quantity int, -- количество заказанного товара
+    transaction_date date
+)
+WITH (
+    appendoptimized = true,
+    compresstype = zstd,
+    compresslevel = 1,
+    orientation = column
+)
+distributed by (customer_id)
+PARTITION BY RANGE (transaction_date) 
+    (start(date '2010-01-01') INCLUSIVE end (date '2023-12-31') INCLUSIVE every (interval '1 year'), 
+     start(date '2024-01-01') INCLUSIVE end (date '2025-03-31') INCLUSIVE every (interval '1 month'),
+     default partition others)
+;  
+
+-- Аналогично по крупным клиентам будет таблица.
+
+/*
+Создадим теперь внешнюю таблицу. 
+Для этого воспользуемся кластером GP в Yandex Cloud, там создадим бакет в объектном хранилище, загрузим туда файл с данными и попробуем его считать с помощью PXF
+Для создания бакета используем инструкцию https://yandex.cloud/ru/docs/storage/quickstart
+Для доступа создаем статический ключ по инструкции https://yandex.cloud/ru/docs/iam/operations/sa/create-access-key
+Загружаем файл test.txt в наш бакет.
+Файл test.txt имеет следующее содержание:
+
+1,111
+2,222
+*/
+
+create external table pxf_s3_test (
+    id int,
+    value int
+)
+LOCATION('pxf://test-external-data-gp/test.txt?PROFILE=s3:text&accesskey=xx&secretkey=xx&endpoint=storage.yandexcloud.net')
+FORMAT 'CSV' ;
+
+select * from pxf_s3_test;
+
+-- Выводится содержимое файла, все работает.
+
+
+
