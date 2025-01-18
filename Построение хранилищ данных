@@ -1,0 +1,607 @@
+-- Ссылка на вариант по модели данных Снежинка - https://github.com/Clairry/GreenplumBasic/blob/main/Индексы%20и%20их%20использование
+
+-- Вариант по модели Data Vault.
+-- Сначала создадим Hubs. У нас в запросах участвовало 6 сущностей: 
+-- customer, lineitem, orders, part, partsupp, supplier
+-- Но partsupp - это не сущность, это связь между part и supplier.
+-- Поэтому у нас 5 Hubs
+
+-- Hubs
+--- Hub customer
+       CREATE TABLE Hub_Customer (
+        customer_hash_key VARCHAR(32) NOT NULL,
+        customer_id INT NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (customer_hash_key);
+
+    insert into Hub_Customer (customer_hash_key, customer_id, load_date, source_system)
+    select md5(c_custkey::text),
+        c_custkey,
+        now(),
+        'homework_sample'
+    from customer;
+
+-- Hub lineitem. Таблица lineitemне имеет простого идентификатора, уникальность дают 4 поля. 
+       CREATE TABLE Hub_Lineitem (
+        lineitem_hash_key VARCHAR(32) NOT NULL,
+        linenumber INTEGER NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (lineitem_hash_key);
+    
+    insert into Hub_Lineitem (lineitem_hash_key, linenumber, load_date, source_system)
+    select md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text),
+        L_LINENUMBER,
+        now(),
+        'homework_sample'
+    from lineitem;
+
+-- Hub orders
+       CREATE TABLE Hub_Orders (
+        order_hash_key VARCHAR(32) NOT NULL,
+        order_id INTEGER NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (order_hash_key);
+
+    insert into Hub_Orders (order_hash_key, order_id, load_date, source_system)
+    select md5(O_ORDERKEY::text),
+        O_ORDERKEY,
+        now(),
+        'homework_sample'
+    from orders;
+
+    -- Hub part
+        CREATE TABLE Hub_Part (
+        part_hash_key VARCHAR(32) NOT NULL,
+        part_id INTEGER NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (part_hash_key);
+
+    insert into Hub_Part (part_hash_key, part_id, load_date, source_system)
+    select md5(P_PARTKEY::text),
+        P_PARTKEY,
+        now(),
+        'homework_sample'
+    from part;
+
+-- Hub supplier
+       CREATE TABLE Hub_Supplier (
+        supplier_hash_key VARCHAR(32) NOT NULL,
+        supplier_id INTEGER NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (supplier_hash_key);
+    
+    insert into Hub_Supplier (supplier_hash_key, supplier_id, load_date, source_system)
+    select md5(S_SUPPKEY::text),
+        S_SUPPKEY,
+        now(),
+        'homework_sample'
+    from supplier;
+
+-- Links
+-- Link Order_Lineitem
+       CREATE TABLE Link_Order_Lineitem (
+        link_hash_key VARCHAR(32) NOT NULL,
+        order_hash_key VARCHAR(32) NOT NULL,
+        lineitem_hash_key VARCHAR(32) NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (link_hash_key);
+
+    insert into Link_Order_Lineitem (
+        link_hash_key, order_hash_key, lineitem_hash_key,
+        load_date, source_system
+    )
+    select md5(CONCAT(MD5(l_orderkey ::text), md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text))) AS link_hash_key,
+        md5(l_orderkey ::text) AS order_hash_key,
+        md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text) AS lineitem_hash_key,
+        now(),
+        'homework_sample'
+    from LINEITEM;
+
+ -- Link Part_Lineitem
+       CREATE TABLE Link_Part_Lineitem (
+        link_hash_key VARCHAR(32) NOT NULL,
+        part_hash_key VARCHAR(32) NOT NULL,
+        lineitem_hash_key VARCHAR(32) NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (link_hash_key);
+
+    insert into Link_Part_Lineitem (
+        link_hash_key, part_hash_key, lineitem_hash_key,
+        load_date, source_system
+    )
+    select md5(CONCAT(md5(L_PARTKEY::text), md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text))) AS link_hash_key,
+        md5(L_PARTKEY::text) AS part_hash_key,
+        md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text) AS lineitem_hash_key,
+        now(),
+        'homework_sample'
+    from LINEITEM;
+
+ -- Link Supplier_Lineitem
+       CREATE TABLE Link_Supplier_Lineitem (
+        link_hash_key VARCHAR(32) NOT NULL,
+        supplier_hash_key VARCHAR(32) NOT NULL,
+        lineitem_hash_key VARCHAR(32) NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (link_hash_key);
+
+    insert into Link_Supplier_Lineitem (
+        link_hash_key, supplier_hash_key, lineitem_hash_key,
+        load_date, source_system
+    )
+    select md5(CONCAT(md5(L_SUPPKEY::text), md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text))) AS link_hash_key,
+        md5(L_SUPPKEY::text) AS supplier_hash_key,
+        md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text) AS lineitem_hash_key,
+        now(),
+        'homework_sample'
+    from LINEITEM;   
+
+ -- Link Order_Customer
+       CREATE TABLE Link_Order_Customer (
+        link_hash_key VARCHAR(32) NOT NULL,
+        order_hash_key VARCHAR(32) NOT NULL,
+        customer_hash_key VARCHAR(32) NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+        ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+        DISTRIBUTED BY (link_hash_key);
+
+    insert into Link_Order_Customer (
+        link_hash_key, order_hash_key, customer_hash_key,
+        load_date, source_system
+    )
+    select md5(CONCAT(md5(O_ORDERKEY::text), md5(O_CUSTKEY::text))) AS link_hash_key,
+        md5(O_ORDERKEY::text) AS order_hash_key,
+        md5(O_CUSTKEY::text) AS customer_hash_key,
+        now(),
+        'homework_sample'
+    from ORDERS; 
+
+-- Link Supplier_Part
+    CREATE TABLE Link_Supplier_Part (
+        link_hash_key VARCHAR(32) NOT NULL,
+        supplier_hash_key VARCHAR(32) NOT NULL,
+        part_hash_key VARCHAR(32) NOT NULL,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+     ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+     DISTRIBUTED BY (link_hash_key);
+
+    insert into Link_Supplier_Part (
+        link_hash_key, supplier_hash_key, part_hash_key,
+        load_date, source_system
+    )
+    select md5(CONCAT(md5(ps_suppkey::text), md5(ps_partkey::text))) AS link_hash_key,
+        md5(ps_suppkey::text) AS supplier_hash_key,
+        md5(ps_partkey::text) AS part_hash_key,
+        now(),
+        'homework_sample'
+    from PARTSUPP;
+
+-- Satellites
+-- Satellite Customer
+       CREATE TABLE Satellite_Customer (
+        customer_hash_key VARCHAR(32) NOT NULL,
+        customer_name VARCHAR(50),
+        customer_address VARCHAR(100),
+        customer_phone VARCHAR(20),
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (customer_hash_key);
+
+    INSERT INTO Satellite_Customer (customer_hash_key, customer_name, customer_address, customer_phone, load_date, source_system)
+    SELECT 
+        md5(c_custkey::text) AS customer_hash_key,
+        c_name AS customer_name,
+        c_address AS customer_address,
+        c_phone AS customer_phone,
+        now(),
+        'homework_sample'
+    FROM CUSTOMER;
+    
+-- Satellite_Order
+       CREATE TABLE Satellite_Order (
+        order_hash_key VARCHAR(32) NOT NULL,
+        order_date DATE,
+        order_status CHAR(1),
+        ship_priority INTEGER,
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (order_hash_key)
+      PARTITION BY RANGE (order_date) 
+       (start('1992-01-01') INCLUSIVE end ('1998-12-31') INCLUSIVE every (30), default partition others);;
+
+    INSERT INTO Satellite_Order (order_hash_key, order_date, order_status, ship_priority, load_date, source_system)
+    SELECT 
+        md5(o_orderkey::text) AS order_hash_key,
+        o_orderdate AS order_date,
+        O_ORDERSTATUS AS order_status,
+        O_SHIPPRIORITY as ship_priority,
+        now(),
+        'homework_sample'
+    FROM ORDERS;
+    
+-- Satellite_Supplier
+       CREATE TABLE Satellite_Supplier (
+        supplier_hash_key VARCHAR(32) NOT NULL,
+        supplier_name VARCHAR(50),
+        supplier_address VARCHAR(100),
+        supplier_phone VARCHAR(20),
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (supplier_hash_key);
+
+    INSERT INTO Satellite_Supplier (supplier_hash_key, supplier_name, supplier_address, supplier_phone, load_date, source_system)
+    SELECT 
+        md5(s_suppkey::text) AS supplier_hash_key,
+        s_name AS supplier_name,
+        s_address AS supplier_address,
+        s_phone AS supplier_phone,
+        now(),
+        'homework_sample'
+    FROM SUPPLIER;
+    
+-- Satellite_Part
+       CREATE TABLE Satellite_Part (
+        part_hash_key CHAR(32) NOT NULL,
+        part_name VARCHAR(55),
+        part_brand VARCHAR(10),
+        part_size INTEGER,
+        part_price DECIMAL(15, 2),
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (part_hash_key)
+
+    INSERT INTO Satellite_Part (part_hash_key, part_name, part_brand, part_size, part_price, load_date, source_system)
+    SELECT 
+        md5(p_partkey::text) AS Part_HashKey,
+        P_NAME AS part_name,
+        P_BRAND AS part_brand,
+        P_SIZE AS part_size,
+        P_RETAILPRICE AS part_price,
+        now(),
+        'homework_sample'
+    FROM PART;
+    
+-- Satellite_LineItem
+       CREATE TABLE Satellite_LineItem (
+        lineitem_hash_key CHAR(32) NOT NULL,
+        Quantity INTEGER,
+        Price DECIMAL(10, 2),
+        Discount DECIMAL(5, 2),
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (lineitem_hash_key)
+
+    INSERT INTO Satellite_LineItem (lineitem_hash_key, Quantity, Price, Discount, load_date, source_system)
+    SELECT 
+        md5(row(L_ORDERKEY, L_PARTKEY, L_SUPPKEY, L_LINENUMBER) ::text) AS lineitem_hash_key,
+        L_QUANTITY AS Quantity,
+        L_EXTENDEDPRICE AS Price,
+        L_DISCOUNT AS Discount,
+        now(),
+        'homework_sample'
+    FROM LINEITEM;
+
+-- Satellite_Partsupp
+-- В отличие от предыдущих Satellite, которые принадлежали Хабам, это будет Satellite связи
+      CREATE TABLE Satellite_Partsupp (
+        link_hash_key CHAR(32) NOT NULL,
+        supply_cost DECIMAL(15, 2), 
+        load_date TIMESTAMP NOT NULL,
+        source_system VARCHAR(20) NOT NULL        
+      ) WITH (appendoptimized = true, compresstype=zstd, compresslevel=1, orientation = column) 
+      DISTRIBUTED BY (link_hash_key);    
+
+      INSERT INTO Satellite_Partsupp (link_hash_key, supply_cost, load_date, source_system)
+      SELECT
+        md5(CONCAT(md5(ps_suppkey::text), md5(ps_partkey::text))),
+        PS_SUPPLYCOST,
+        now(),
+        'homework_sample'       
+      FROM partsupp;
+
+-- Составим запросы на основе таблиц в моделе DV
+-- Retrieve Customer Orders with Order and Customer Details
+explain analyse
+SELECT sc.customer_name, 
+       sc.customer_address,
+       sc.customer_phone,
+       so.order_date,
+       so.order_status,
+       so.ship_priority
+From Hub_Customer hc
+        Join Link_Order_Customer loc on (hc.customer_hash_key = loc.customer_hash_key)
+        Join Hub_Orders ho on (loc.order_hash_key = ho.order_hash_key)
+        Join Satellite_Customer sc on (sc.customer_hash_key = hc.customer_hash_key)
+        Join Satellite_Order so on (so.order_hash_key = ho.order_hash_key)
+where sc.customer_name = 'Customer#000000005';
+
+-- Получившееся время - Execution time: 29.798 ms
+-- План запроса:
+Hash Join  (cost=0.00..2166.91 rows=5000 width=70) (actual time=28.076..28.076 rows=0 loops=1)
+  Hash Cond: (((link_order_customer.order_hash_key)::text = (hub_orders.order_hash_key)::text) AND ((link_order_customer.order_hash_key)::text = (satellite_order.order_hash_key)::text))
+  Extra Text: Hash chain length 1.2 avg, 5 max, using 17204 of 65536 buckets.
+  ->  Gather Motion 4:1  (slice2; segments: 4)  (cost=0.00..1298.52 rows=2 width=94) (actual time=0.002..0.002 rows=0 loops=1)
+        ->  Hash Join  (cost=0.00..1298.52 rows=1 width=94) (never executed)
+              Hash Cond: (((link_order_customer.customer_hash_key)::text = (hub_customer.customer_hash_key)::text) AND ((link_order_customer.customer_hash_key)::text = (satellite_customer.customer_hash_key)::text))
+              ->  Seq Scan on link_order_customer  (cost=0.00..431.38 rows=5000 width=66) (actual time=0.124..0.605 rows=5081 loops=1)
+              ->  Hash  (cost=865.02..865.02 rows=1 width=127) (actual time=13.725..13.725 rows=1 loops=1)
+                    ->  Broadcast Motion 4:4  (slice1; segments: 4)  (cost=0.00..865.02 rows=1 width=127) (actual time=13.722..13.722 rows=1 loops=1)
+                          ->  Hash Join  (cost=0.00..865.02 rows=1 width=127) (actual time=1.307..2.259 rows=1 loops=1)
+                                Hash Cond: ((hub_customer.customer_hash_key)::text = (satellite_customer.customer_hash_key)::text)
+                                Extra Text: (seg3)   Hash chain length 1.0 avg, 1 max, using 1 of 32768 buckets.
+                                ->  Seq Scan on hub_customer  (cost=0.00..431.31 rows=7500 width=33) (actual time=0.068..0.562 rows=7465 loops=1)
+                                ->  Hash  (cost=431.79..431.79 rows=1 width=94) (actual time=1.145..1.145 rows=1 loops=1)
+                                      ->  Seq Scan on satellite_customer  (cost=0.00..431.79 rows=1 width=94) (actual time=0.249..1.143 rows=1 loops=1)
+                                            Filter: ((customer_name)::text = 'Customer#000000005'::text)
+  ->  Hash  (cost=863.48..863.48 rows=1 width=50) (actual time=27.670..27.670 rows=20000 loops=1)
+        Buckets: 65536  Batches: 1  Memory Usage: 2032kB
+        ->  Gather Motion 4:1  (slice3; segments: 4)  (cost=0.00..863.48 rows=1 width=50) (actual time=17.446..24.944 rows=20000 loops=1)
+              ->  Hash Join  (cost=0.00..863.48 rows=1 width=50) (actual time=13.817..16.198 rows=5053 loops=1)
+                    Hash Cond: ((hub_orders.order_hash_key)::text = (satellite_order.order_hash_key)::text)
+                    Extra Text: (seg3)   Hash chain length 1.0 avg, 3 max, using 4951 of 131072 buckets.
+                    ->  Seq Scan on hub_orders  (cost=0.00..431.21 rows=5000 width=33) (actual time=0.074..0.501 rows=5053 loops=1)
+                    ->  Hash  (cost=431.00..431.00 rows=1 width=17) (actual time=13.509..13.509 rows=5053 loops=1)
+                          ->  Sequence  (cost=0.00..431.00 rows=1 width=17) (actual time=0.159..11.856 rows=5053 loops=1)
+                                ->  Partition Selector for satellite_order (dynamic scan id: 1)  (cost=10.00..100.00 rows=25 width=4) (never executed)
+                                      Partitions selected: 87 (out of 87)
+                                ->  Dynamic Seq Scan on satellite_order (dynamic scan id: 1)  (cost=0.00..431.00 rows=1 width=17) (actual time=0.151..11.665 rows=5053 loops=1)
+                                      Partitions scanned:  Avg 87.0 (out of 87) x 4 workers.  Max 87 parts (seg0).
+
+-- Retrieve Detailed Order Information with Line Items
+explain analyse
+SELECT so.order_date,
+       so.order_status,
+       so.ship_priority,
+       sl.quantity, 
+       sl.price,
+       sl.discount
+FROM Hub_LineItem hl 
+        Join Link_Order_LineItem lol on (hl.lineitem_hash_key = lol.lineitem_hash_key)
+        Join Hub_Orders ho on (lol.order_hash_key = ho.order_hash_key)
+        Join Satellite_Order so on (ho.order_hash_key = so.order_hash_key)
+        Join Satellite_LineItem sl on (sl.lineitem_hash_key = hl.lineitem_hash_key)
+where ho.order_id = '6';
+
+-- Получившееся время - Execution time: 37.979 ms
+-- План запроса:
+Gather Motion 4:1  (slice4; segments: 4)  (cost=0.00..2166.73 rows=1 width=25) (actual time=36.348..36.349 rows=1 loops=1)
+  ->  Hash Join  (cost=0.00..2166.73 rows=1 width=25) (actual time=34.019..36.020 rows=1 loops=1)
+        Hash Cond: (((hub_lineitem.lineitem_hash_key)::text = (link_order_lineitem.lineitem_hash_key)::text) AND ((hub_lineitem.lineitem_hash_key)::bpchar = satellite_lineitem.lineitem_hash_key) AND ((hub_lineitem.lineitem_hash_key)::text = (satellite_lineitem.lineitem_hash_key)::text))
+        Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 1 of 65536 buckets.
+        ->  Seq Scan on hub_lineitem  (cost=0.00..431.38 rows=10000 width=33) (actual time=0.066..0.764 rows=9856 loops=1)
+        ->  Hash  (cost=1731.92..1731.92 rows=1 width=91) (actual time=33.878..33.878 rows=1 loops=1)
+              ->  Hash Join  (cost=0.00..1731.92 rows=1 width=91) (actual time=30.287..33.860 rows=1 loops=1)
+                    Hash Cond: ((satellite_lineitem.lineitem_hash_key)::text = (link_order_lineitem.lineitem_hash_key)::text)
+                    Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 1 of 65536 buckets.
+                    ->  Seq Scan on satellite_lineitem  (cost=0.00..431.48 rows=10000 width=49) (actual time=0.301..1.728 rows=10205 loops=1)
+                    ->  Hash  (cost=1297.50..1297.50 rows=1 width=42) (actual time=29.997..29.997 rows=1 loops=1)
+                          ->  Broadcast Motion 4:4  (slice3; segments: 4)  (cost=0.00..1297.50 rows=1 width=42) (actual time=29.993..29.993 rows=1 loops=1)
+                                ->  Hash Join  (cost=0.00..1297.49 rows=1 width=42) (actual time=21.095..28.093 rows=1 loops=1)
+                                      Hash Cond: (((link_order_lineitem.order_hash_key)::text = (hub_orders.order_hash_key)::text) AND ((satellite_order.order_hash_key)::text = (hub_orders.order_hash_key)::text))
+                                      Extra Text: (seg3)   Hash chain length 1.0 avg, 1 max, using 1 of 131072 buckets.
+                                      ->  Redistribute Motion 4:4  (slice2; segments: 4)  (cost=0.00..866.12 rows=1 width=83) (actual time=19.961..26.233 rows=10091 loops=1)
+                                            Hash Key: link_order_lineitem.order_hash_key
+                                            ->  Hash Join  (cost=0.00..866.12 rows=1 width=83) (actual time=21.558..26.069 rows=10059 loops=1)
+                                                  Hash Cond: ((link_order_lineitem.order_hash_key)::text = (satellite_order.order_hash_key)::text)
+                                                  Extra Text: (seg0)   Hash chain length 1.1 avg, 3 max, using 18500 of 131072 buckets.
+                                                  ->  Seq Scan on link_order_lineitem  (cost=0.00..431.75 rows=10000 width=66) (actual time=0.161..1.286 rows=10060 loops=1)
+                                                  ->  Hash  (cost=431.00..431.00 rows=1 width=17) (actual time=21.315..21.315 rows=20000 loops=1)
+                                                        ->  Broadcast Motion 4:4  (slice1; segments: 4)  (cost=0.00..431.00 rows=1 width=17) (actual time=0.886..17.618 rows=20000 loops=1)
+                                                              ->  Sequence  (cost=0.00..431.00 rows=1 width=17) (actual time=0.303..16.729 rows=5053 loops=1)
+                                                                    ->  Partition Selector for satellite_order (dynamic scan id: 1)  (cost=10.00..100.00 rows=25 width=4) (never executed)
+                                                                          Partitions selected: 87 (out of 87)
+                                                                    ->  Dynamic Seq Scan on satellite_order (dynamic scan id: 1)  (cost=0.00..431.00 rows=1 width=17) (actual time=0.295..16.463 rows=5053 loops=1)
+                                                                          Partitions scanned:  Avg 87.0 (out of 87) x 4 workers.  Max 87 parts (seg0).
+                                      ->  Hash  (cost=431.37..431.37 rows=1 width=33) (actual time=0.388..0.388 rows=1 loops=1)
+                                            ->  Seq Scan on hub_orders  (cost=0.00..431.37 rows=1 width=33) (actual time=0.170..0.385 rows=1 loops=1)
+                                                  Filter: (order_id = 6)
+
+-- Retrieve Supplier and Part Information for Each Supplier-Part Relationship
+explain analyse
+SELECT sp.part_name, 
+       ss.supplier_name,
+       sp.part_brand,
+       sp.part_size,
+       sp.part_price,
+       ss.supplier_address
+FROM Hub_Part hp 
+        join Link_Supplier_Part lsp on (hp.part_hash_key = lsp.part_hash_key)
+        join Hub_Supplier hs on (lsp.supplier_hash_key = hs.supplier_hash_key)
+        join Satellite_Part sp on (hp.part_hash_key = sp.part_hash_key)
+        join Satellite_Supplier ss on (hs.supplier_hash_key = ss.supplier_hash_key)
+        JOIN Satellite_Partsupp sps on (lsp.link_hash_key = sps.link_hash_key)
+where sp.part_size=41 and sps.supply_cost<400;
+
+-- Получившееся время - Execution time: 13.834 ms
+-- План запроса:
+Gather Motion 4:1  (slice5; segments: 4)  (cost=0.00..2595.46 rows=399 width=97) (actual time=11.840..12.143 rows=166 loops=1)
+  ->  Hash Join  (cost=0.00..2595.33 rows=100 width=97) (actual time=10.636..11.826 rows=51 loops=1)
+        Hash Cond: ((satellite_partsupp.link_hash_key = (link_supplier_part.link_hash_key)::bpchar) AND ((satellite_partsupp.link_hash_key)::text = (link_supplier_part.link_hash_key)::text))
+        Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 104 of 65536 buckets.
+        Extra Text: (seg3)   Hash chain length 1.0 avg, 1 max, using 112 of 65536 buckets.
+        ->  Seq Scan on satellite_partsupp  (cost=0.00..431.52 rows=2004 width=33) (actual time=0.167..0.779 rows=2086 loops=1)
+              Filter: (supply_cost < 400::numeric)
+        ->  Hash  (cost=2163.08..2163.08 rows=100 width=130) (actual time=10.320..10.320 rows=112 loops=1)
+              ->  Redistribute Motion 4:4  (slice4; segments: 4)  (cost=0.00..2163.08 rows=100 width=130) (actual time=10.155..10.296 rows=112 loops=1)
+                    Hash Key: link_supplier_part.link_hash_key
+                    ->  Hash Join  (cost=0.00..2163.04 rows=100 width=130) (actual time=7.141..7.377 rows=112 loops=1)
+                          Hash Cond: ((satellite_supplier.supplier_hash_key)::text = (hub_supplier.supplier_hash_key)::text)
+                          Extra Text: (seg1)   Hash chain length 1.2 avg, 3 max, using 96 of 65536 buckets.
+                          ->  Seq Scan on satellite_supplier  (cost=0.00..431.04 rows=500 width=78) (actual time=0.071..0.100 rows=516 loops=1)
+                          ->  Hash  (cost=1731.49..1731.49 rows=100 width=118) (actual time=6.883..6.883 rows=112 loops=1)
+                                ->  Hash Join  (cost=0.00..1731.49 rows=100 width=118) (actual time=6.712..6.844 rows=112 loops=1)
+                                      Hash Cond: ((hub_supplier.supplier_hash_key)::text = (link_supplier_part.supplier_hash_key)::text)
+                                      Extra Text: (seg1)   Hash chain length 1.2 avg, 3 max, using 96 of 65536 buckets.
+                                      ->  Seq Scan on hub_supplier  (cost=0.00..431.02 rows=500 width=33) (actual time=0.046..0.069 rows=516 loops=1)
+                                      ->  Hash  (cost=1300.03..1300.03 rows=100 width=118) (actual time=6.518..6.518 rows=112 loops=1)
+                                            ->  Redistribute Motion 4:4  (slice3; segments: 4)  (cost=0.00..1300.03 rows=100 width=118) (actual time=4.792..6.493 rows=112 loops=1)
+                                                  Hash Key: link_supplier_part.supplier_hash_key
+                                                  ->  Hash Join  (cost=0.00..1299.99 rows=100 width=118) (actual time=4.825..5.985 rows=112 loops=1)
+                                                        Hash Cond: (((link_supplier_part.part_hash_key)::text = (hub_part.part_hash_key)::text) AND ((link_supplier_part.part_hash_key)::text = (satellite_part.part_hash_key)::text))
+                                                        Extra Text: (seg3)   Hash chain length 1.0 avg, 2 max, using 398 of 65536 buckets.
+                                                        ->  Seq Scan on link_supplier_part  (cost=0.00..431.38 rows=5000 width=99) (actual time=0.182..0.814 rows=5133 loops=1)
+                                                        ->  Hash  (cost=864.92..864.92 rows=399 width=118) (actual time=5.161..5.161 rows=399 loops=1)
+                                                              ->  Broadcast Motion 4:4  (slice2; segments: 4)  (cost=0.00..864.92 rows=399 width=118) (actual time=1.679..4.994 rows=399 loops=1)
+                                                                    ->  Hash Join  (cost=0.00..864.27 rows=100 width=118) (actual time=3.643..4.694 rows=120 loops=1)
+                                                                          Hash Cond: (((hub_part.part_hash_key)::bpchar = satellite_part.part_hash_key) AND ((hub_part.part_hash_key)::text = (satellite_part.part_hash_key)::text))
+                                                                          Extra Text: (seg0)   Hash chain length 1.0 avg, 2 max, using 119 of 65536 buckets.
+                                                                          ->  Seq Scan on hub_part  (cost=0.00..431.21 rows=5000 width=33) (actual time=0.072..0.478 rows=5035 loops=1)
+                                                                          ->  Hash  (cost=431.55..431.55 rows=100 width=85) (actual time=3.399..3.399 rows=120 loops=1)
+                                                                                ->  Redistribute Motion 4:4  (slice1; segments: 4)  (cost=0.00..431.55 rows=100 width=85) (actual time=2.039..3.341 rows=120 loops=1)
+                                                                                      Hash Key: (satellite_part.part_hash_key)::text
+                                                                                      ->  Seq Scan on satellite_part  (cost=0.00..431.52 rows=100 width=85) (actual time=1.872..2.459 rows=120 loops=1)
+                                                                                            Filter: (part_size = 41)
+
+
+-- Retrieve Comprehensive Customer Order and Line Item Details  
+explain analyse
+SELECT sc.customer_name, 
+       sl.quantity, 
+       sl.price,
+       sl.discount,
+       so.order_date,
+       so.order_status,
+       so.ship_priority
+From Hub_LineItem hl 
+        join Link_Order_LineItem lol on (hl.lineitem_hash_key = lol.lineitem_hash_key)
+        join Hub_Orders ho on (lol.order_hash_key = ho.order_hash_key)
+        join Link_Order_Customer loc on (ho.order_hash_key = loc.order_hash_key)
+        join Hub_Customer hc on (loc.customer_hash_key = hc.customer_hash_key)
+        join Satellite_Customer sc on (hc.customer_hash_key = sc.customer_hash_key)
+        join Satellite_LineItem sl on (hl.lineitem_hash_key = sl.lineitem_hash_key)
+        join Satellite_Order so on (ho.order_hash_key = so.order_hash_key)
+where sl.quantity > 1000 and so.order_date between '1992-01-01' and '1992-03-31'; 
+
+-- Получившееся время - Execution time: 12.453 ms
+-- План запроса:
+Hash Join  (cost=0.00..3465.33 rows=1 width=44) (actual time=6.877..6.877 rows=0 loops=1)
+  Hash Cond: ((hub_orders.order_hash_key)::text = (satellite_order.order_hash_key)::text)
+  Extra Text: Hash chain length 1.0 avg, 2 max, using 769 of 131072 buckets.
+  ->  Gather Motion 4:1  (slice6; segments: 4)  (cost=0.00..3034.33 rows=1 width=68) (actual time=3.751..3.751 rows=0 loops=1)
+        ->  Hash Join  (cost=0.00..3034.33 rows=1 width=68) (never executed)
+              Hash Cond: ((satellite_customer.customer_hash_key)::text = (hub_customer.customer_hash_key)::text)
+              ->  Seq Scan on satellite_customer  (cost=0.00..431.54 rows=7500 width=52) (never executed)
+              ->  Hash  (cost=2600.52..2600.52 rows=1 width=82) (never executed)
+                    ->  Hash Join  (cost=0.00..2600.52 rows=1 width=82) (never executed)
+                          Hash Cond: ((hub_customer.customer_hash_key)::text = (link_order_customer.customer_hash_key)::text)
+                          ->  Seq Scan on hub_customer  (cost=0.00..431.31 rows=7500 width=33) (never executed)
+                          ->  Hash  (cost=2167.29..2167.29 rows=1 width=82) (never executed)
+                                ->  Broadcast Motion 4:4  (slice5; segments: 4)  (cost=0.00..2167.29 rows=1 width=82) (never executed)
+                                      ->  Hash Join  (cost=0.00..2167.29 rows=1 width=82) (never executed)
+                                            Hash Cond: ((link_order_customer.order_hash_key)::text = (hub_orders.order_hash_key)::text)
+                                            ->  Seq Scan on link_order_customer  (cost=0.00..431.38 rows=5000 width=66) (never executed)
+                                            ->  Hash  (cost=1734.23..1734.23 rows=1 width=49) (never executed)
+                                                  ->  Broadcast Motion 4:4  (slice4; segments: 4)  (cost=0.00..1734.23 rows=1 width=49) (never executed)
+                                                        ->  Hash Join  (cost=0.00..1734.23 rows=1 width=49) (never executed)
+                                                              Hash Cond: ((hub_orders.order_hash_key)::text = (link_order_lineitem.order_hash_key)::text)
+                                                              ->  Seq Scan on hub_orders  (cost=0.00..431.21 rows=5000 width=33) (never executed)
+                                                              ->  Hash  (cost=1301.75..1301.75 rows=1 width=49) (never executed)
+                                                                    ->  Broadcast Motion 4:4  (slice3; segments: 4)  (cost=0.00..1301.75 rows=1 width=49) (never executed)
+                                                                          ->  Hash Join  (cost=0.00..1301.75 rows=1 width=49) (never executed)
+                                                                                Hash Cond: (((link_order_lineitem.lineitem_hash_key)::text = (hub_lineitem.lineitem_hash_key)::text) AND ((link_order_lineitem.lineitem_hash_key)::text = (satellite_lineitem.lineitem_hash_key)::text))
+                                                                                ->  Seq Scan on link_order_lineitem  (cost=0.00..431.75 rows=10000 width=66) (never executed)
+                                                                                ->  Hash  (cost=865.75..865.75 rows=1 width=82) (never executed)
+                                                                                      ->  Broadcast Motion 4:4  (slice2; segments: 4)  (cost=0.00..865.75 rows=1 width=82) (never executed)
+                                                                                            ->  Hash Join  (cost=0.00..865.75 rows=1 width=82) (never executed)
+                                                                                                  Hash Cond: (((hub_lineitem.lineitem_hash_key)::bpchar = satellite_lineitem.lineitem_hash_key) AND ((hub_lineitem.lineitem_hash_key)::text = (satellite_lineitem.lineitem_hash_key)::text))
+                                                                                                  ->  Seq Scan on hub_lineitem  (cost=0.00..431.38 rows=10000 width=33) (never executed)
+                                                                                                  ->  Hash  (cost=431.81..431.81 rows=1 width=49) (never executed)
+                                                                                                        ->  Broadcast Motion 4:4  (slice1; segments: 4)  (cost=0.00..431.81 rows=1 width=49) (never executed)
+                                                                                                              ->  Seq Scan on satellite_lineitem  (cost=0.00..431.81 rows=1 width=49) (never executed)
+                                                                                                                    Filter: (quantity > 1000)
+  ->  Hash  (cost=431.00..431.00 rows=1 width=17) (actual time=2.938..2.938 rows=772 loops=1)
+        Buckets: 131072  Batches: 1  Memory Usage: 55kB
+        ->  Gather Motion 4:1  (slice7; segments: 4)  (cost=0.00..431.00 rows=1 width=17) (actual time=2.194..2.799 rows=772 loops=1)
+              ->  Sequence  (cost=0.00..431.00 rows=1 width=17) (actual time=0.487..1.222 rows=200 loops=1)
+                    ->  Partition Selector for satellite_order (dynamic scan id: 1)  (cost=10.00..100.00 rows=25 width=4) (never executed)
+                          Partitions selected: 5 (out of 87)
+                    ->  Dynamic Seq Scan on satellite_order (dynamic scan id: 1)  (cost=0.00..431.00 rows=1 width=17) (actual time=0.482..1.205 rows=200 loops=1)
+                          Filter: ((order_date >= '1992-01-01'::date) AND (order_date <= '1992-03-31'::date))
+                          Partitions scanned:  Avg 5.0 (out of 87) x 4 workers.  Max 5 parts (seg0).
+
+                                                
+-- Retrieve All Parts Supplied by a Specific Supplier with Supplier Details
+explain analyse
+SELECT ss.supplier_name, 
+       sp.part_name, 
+       sps.supply_cost
+FROM Hub_Part hp 
+        join Link_Supplier_Part lsp on (hp.part_hash_key = lsp.part_hash_key)
+        join Hub_Supplier hs on (lsp.supplier_hash_key = hs.supplier_hash_key)
+        join Satellite_Part sp on (hp.part_hash_key = sp.part_hash_key)
+        join Satellite_Supplier ss on (hs.supplier_hash_key = ss.supplier_hash_key)
+        JOIN Satellite_Partsupp sps on (lsp.link_hash_key = sps.link_hash_key)
+where hs.supplier_id  = 5 
+
+-- Получившееся время - Execution time: 14.003 ms
+-- План запроса:
+Gather Motion 4:1  (slice4; segments: 4)  (cost=0.00..2594.22 rows=10 width=58) (actual time=12.958..12.992 rows=11 loops=1)
+  ->  Hash Join  (cost=0.00..2594.22 rows=3 width=58) (actual time=10.702..12.337 rows=4 loops=1)
+        Hash Cond: ((satellite_partsupp.link_hash_key = (link_supplier_part.link_hash_key)::bpchar) AND ((satellite_partsupp.link_hash_key)::text = (link_supplier_part.link_hash_key)::text))
+        Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 4 of 65536 buckets.
+        Extra Text: (seg1)   Hash chain length 1.0 avg, 1 max, using 4 of 65536 buckets.
+        ->  Seq Scan on satellite_partsupp  (cost=0.00..431.21 rows=5000 width=39) (actual time=0.104..0.480 rows=5013 loops=1)
+        ->  Hash  (cost=2161.65..2161.65 rows=3 width=85) (actual time=10.380..10.380 rows=4 loops=1)
+              ->  Redistribute Motion 4:4  (slice3; segments: 4)  (cost=0.00..2161.65 rows=3 width=85) (actual time=9.931..10.374 rows=4 loops=1)
+                    Hash Key: link_supplier_part.link_hash_key
+                    ->  Hash Join  (cost=0.00..2161.65 rows=3 width=85) (actual time=3.835..6.777 rows=5 loops=1)
+                          Hash Cond: ((satellite_part.part_hash_key = (hub_part.part_hash_key)::bpchar) AND ((satellite_part.part_hash_key)::text = (hub_part.part_hash_key)::text) AND ((satellite_part.part_hash_key)::text = (link_supplier_part.part_hash_key)::text))
+                          Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 5 of 65536 buckets.
+                          ->  Seq Scan on satellite_part  (cost=0.00..431.34 rows=5000 width=66) (actual time=0.112..0.611 rows=5035 loops=1)
+                          ->  Hash  (cost=1728.19..1728.19 rows=3 width=118) (actual time=3.439..3.439 rows=5 loops=1)
+                                ->  Hash Join  (cost=0.00..1728.19 rows=3 width=118) (actual time=2.606..3.435 rows=5 loops=1)
+                                      Hash Cond: ((hub_part.part_hash_key)::text = (link_supplier_part.part_hash_key)::text)
+                                      Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 5 of 65536 buckets.
+                                      ->  Seq Scan on hub_part  (cost=0.00..431.21 rows=5000 width=33) (actual time=0.062..0.383 rows=5035 loops=1)
+                                      ->  Hash  (cost=1295.70..1295.70 rows=3 width=85) (actual time=2.374..2.374 rows=5 loops=1)
+                                            ->  Redistribute Motion 4:4  (slice2; segments: 4)  (cost=0.00..1295.70 rows=3 width=85) (actual time=1.118..2.368 rows=5 loops=1)
+                                                  Hash Key: link_supplier_part.part_hash_key
+                                                  ->  Hash Join  (cost=0.00..1295.70 rows=3 width=85) (actual time=2.386..3.445 rows=4 loops=1)
+                                                        Hash Cond: ((link_supplier_part.supplier_hash_key)::text = (hub_supplier.supplier_hash_key)::text)
+                                                        Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 1 of 131072 buckets.
+                                                        ->  Seq Scan on link_supplier_part  (cost=0.00..431.38 rows=5000 width=99) (actual time=0.200..0.851 rows=5133 loops=1)
+                                                        ->  Hash  (cost=862.23..862.23 rows=1 width=52) (actual time=1.822..1.822 rows=1 loops=1)
+                                                              ->  Broadcast Motion 4:4  (slice1; segments: 4)  (cost=0.00..862.23 rows=1 width=52) (actual time=1.817..1.818 rows=1 loops=1)
+                                                                    ->  Hash Join  (cost=0.00..862.23 rows=1 width=52) (actual time=0.414..0.569 rows=1 loops=1)
+                                                                          Hash Cond: ((satellite_supplier.supplier_hash_key)::text = (hub_supplier.supplier_hash_key)::text)
+                                                                          Extra Text: (seg3)   Hash chain length 1.0 avg, 1 max, using 1 of 131072 buckets.
+                                                                          ->  Seq Scan on satellite_supplier  (cost=0.00..431.04 rows=500 width=52) (actual time=0.064..0.088 rows=513 loops=1)
+                                                                          ->  Hash  (cost=431.04..431.04 rows=1 width=33) (actual time=0.071..0.071 rows=1 loops=1)
+                                                                                ->  Seq Scan on hub_supplier  (cost=0.00..431.04 rows=1 width=33) (actual time=0.059..0.070 rows=1 loops=1)
+                                                                                      Filter: (supplier_id = 5)
+
+
+-- Вывод. 
+-- Нельзя сделать однозначный вывод, какую модель данных лучше применить в работе.
+-- Все зависит от бизнес-задачи, от предъявляемых к хранилищу требований. 
+-- Как часто могут добавляться новые источники, производиться миграция (что проще делать в DV), 
+-- обновляться структура поступающих данных (например, регламентная структура входящих документов, которую опять же будет проще поменять в парадигме DV).
+-- Главный вывод такой: важно заранее проанализировать предметную область, ее окружение и сознательно подойти к выбору модели.
+-- Если в предметной области ничего не меняется, то нет смысла усложнять структуру моделью DV. 
+-- Ведь увеличение количества таблиц приводит к усложнению джойнов и увеличению нагрузки при их исполнении.
+-- Но если все часто меняется, пллюс хранилище большое - затраты на перестройку модели или добавление костылей при использовании Снежинки, могут быть очень важны.
+-- Не должно быть такого: используем DV, так как это модно. 
+-- Или: используем Снежинку, так как давно используют и как-то справились.  
+-- Таким образом, нужно знать доступные инструменты моделирования и подстраиваться под конкретную задачу.                                                                                      
