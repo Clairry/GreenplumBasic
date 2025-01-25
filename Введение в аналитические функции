@@ -1,0 +1,295 @@
+-- Сначала создадим денормализованную таблицу для аналитики - tcph_analytics.
+-- Она будет являться объединением 4 таблиц.
+-- Мы не планируем ее джойнить, это готовая широкая таблица для аналитики, 
+-- поэтому данные равномерно распределим по сегментам
+
+CREATE TABLE tcph_analytics (
+    --lineitem
+    L_ORDERKEY BIGINT,
+    L_QUANTITY DECIMAL(15, 2),
+    L_EXTENDEDPRICE DECIMAL(15, 2),
+    L_DISCOUNT DECIMAL(15, 2),
+    L_SHIPDATE DATE,
+    L_LINENUMBER INTEGER,
+    --order
+    O_TOTALPRICE DECIMAL(15, 2),
+    O_ORDERDATE DATE,
+    O_SHIPPRIORITY INTEGER,
+    O_CUSTKEY INT,
+    --customer
+    C_NAME VARCHAR(25),
+    C_ADDRESS VARCHAR(40),
+    C_PHONE CHAR(15),
+    C_ACCTBAL DECIMAL(15, 2),
+    C_MKTSEGMENT CHAR(10),
+    --part
+    P_PARTKEY INT,
+    P_NAME VARCHAR(55),
+    P_BRAND CHAR(10),
+    P_TYPE VARCHAR(25),
+    P_SIZE INTEGER,
+    P_RETAILPRICE DECIMAL(15, 2),
+    P_COMMENT VARCHAR(23),
+    --supplier
+    S_SUPPKEY INT,
+    S_NAME CHAR(25),
+    S_ADDRESS VARCHAR(40),
+    --partsupp
+    PS_SUPPLYCOST DECIMAL(15, 2)
+)
+WITH (
+    appendonly = true,
+    orientation = column,
+    compresstype = ZSTD
+) 
+DISTRIBUTED RANDOMLY
+PARTITION BY RANGE (L_SHIPDATE) 
+    (start('1992-01-01') INCLUSIVE end ('1998-12-31') INCLUSIVE every (30), default partition others);
+
+-- Вставка данных
+insert into tcph_analytics (
+    L_ORDERKEY,
+    L_QUANTITY,
+    L_EXTENDEDPRICE,
+    l_discount,
+    L_SHIPDATE,
+    L_LINENUMBER,
+    O_TOTALPRICE,
+    O_ORDERDATE,
+    O_SHIPPRIORITY,
+    O_CUSTKEY,
+    C_NAME,
+    C_ADDRESS,
+    C_PHONE,
+    C_ACCTBAL,
+    C_MKTSEGMENT,
+    P_PARTKEY,
+    P_NAME,
+    P_BRAND,
+    P_TYPE,
+    P_SIZE,
+    P_RETAILPRICE,
+    P_COMMENT,
+    S_SUPPKEY,
+    S_NAME,
+    S_ADDRESS,
+    PS_SUPPLYCOST
+)
+select 
+    lineitem.L_ORDERKEY,
+    lineitem.L_QUANTITY,
+    lineitem.L_EXTENDEDPRICE,
+    lineitem.l_discount,
+    lineitem.L_SHIPDATE,
+    lineitem.L_LINENUMBER,
+    orders.O_TOTALPRICE,
+    orders.O_ORDERDATE,
+    orders.O_SHIPPRIORITY,
+    orders.O_CUSTKEY,
+    customer.C_NAME,
+    customer.C_ADDRESS,
+    customer.C_PHONE,
+    customer.C_ACCTBAL,
+    customer.C_MKTSEGMENT,
+    part.P_PARTKEY,
+    part.P_NAME,
+    part.P_BRAND,
+    part.P_TYPE,
+    part.P_SIZE,
+    part.P_RETAILPRICE,
+    part.P_COMMENT,
+    supplier.S_SUPPKEY,
+    supplier.S_NAME,
+    supplier.S_ADDRESS,
+    partsupp.PS_SUPPLYCOST
+from    
+lineitem inner join orders on (lineitem.L_ORDERKEY=orders.O_ORDERKEY)
+         inner join part on (lineitem.L_PARTKEY=part.P_PARTKEY)
+         inner join customer on (orders.O_CUSTKEY=customer.C_CUSTKEY)
+         inner join partsupp on (part.P_PARTKEY=partsupp.PS_PARTKEY)
+         inner join supplier on (partsupp.PS_SUPPKEY=supplier.S_SUPPKEY);
+
+-- Допустим, у нас в организации несколько отделов, каждый из которых занимается 
+-- коллекциями брендов разного ценового сегмента (бюджетные, средний, премиум).
+-- Список брендов определен справочником принадлежности бренда к сегменту = отделу.
+
+-- Создадим справочник
+create table brand_dictionary
+(
+    brand CHAR(10),
+    type_code int
+)
+distributed replicated;
+
+insert into brand_dictionary (brand, type_code)
+select distinct P_BRAND, floor(random() * 3 + 1)
+from tcph_analytics;
+
+-- Создадим для каждого отдела свое материализованное представление для работы. 
+-- Только на него будут выданы права на доступ.
+CREATE MATERIALIZED VIEW tcph_analytics_economy_brands 
+as select 
+    L_ORDERKEY,
+    L_QUANTITY,
+    L_EXTENDEDPRICE,
+    l_discount,
+    L_SHIPDATE,
+    L_LINENUMBER,
+    O_TOTALPRICE,
+    O_ORDERDATE,
+    O_SHIPPRIORITY,
+    O_CUSTKEY,
+    C_NAME,
+    C_ADDRESS,
+    C_PHONE,
+    C_ACCTBAL,
+    C_MKTSEGMENT,
+    P_PARTKEY,
+    P_NAME,
+    P_BRAND,
+    P_TYPE,
+    P_SIZE,
+    P_RETAILPRICE,
+    P_COMMENT,
+    S_SUPPKEY,
+    S_NAME,
+    S_ADDRESS,
+    PS_SUPPLYCOST
+from tcph_analytics ta join brand_dictionary bdict on (ta.P_BRAND = bdict.BRAND)
+where type_code = 1;
+
+-- Аналогично создается для type_code 2 и 3.
+
+-- Теперь построим несколько аналитических отчетов.
+
+-- 1. Отранжируем бренды по общей сумме за проданный объем за прошлый месяц, а также по общему проданному количеству
+-- в порядке от самых продаваемых до менее продаваемых. 
+-- В более реальном отчете вместо даты будет current_date. Но у нас такой сэмпл, что за этот промежуток нет данных
+
+with total as (
+SELECT 
+    P_BRAND,
+    sum(O_TOTALPRICE) as total_sum,
+    sum(L_QUANTITY) as total_quantity
+FROM tcph_analytics_economy_brands
+WHERE L_SHIPDATE >= date_trunc('month', to_date('1998-12-31', 'YYYY-MM-DD') - interval '1' month)
+  and L_SHIPDATE < date_trunc('month', to_date('1998-12-31', 'YYYY-MM-DD'))
+group by P_BRAND
+) 
+select 
+	P_BRAND,
+	total_sum,
+	row_number() over (order by total_sum desc) as sum_score,
+	total_quantity, 
+	row_number() over (order by total_quantity desc) as quantity_score
+from total;
+-- Execution time: 3.224 ms
+-- План запроса
+WindowAgg  (cost=0.00..431.20 rows=7 width=40) (actual time=2.290..2.292 rows=4 loops=1)
+  Order By: (pg_catalog.sum((sum(l_quantity))))
+  ->  Sort  (cost=0.00..431.20 rows=7 width=32) (actual time=2.286..2.287 rows=4 loops=1)
+        Sort Key: (pg_catalog.sum((sum(l_quantity))))
+        Sort Method:  quicksort  Memory: 33kB
+        ->  WindowAgg  (cost=0.00..431.18 rows=7 width=32) (actual time=2.261..2.268 rows=4 loops=1)
+              Order By: (pg_catalog.sum((sum(o_totalprice))))
+              ->  Gather Motion 4:1  (slice2; segments: 4)  (cost=0.00..431.17 rows=25 width=27) (actual time=2.256..2.259 rows=4 loops=1)
+                    Merge Key: (pg_catalog.sum((sum(o_totalprice))))
+                    ->  Result  (cost=0.00..431.17 rows=7 width=27) (actual time=1.944..1.946 rows=1 loops=1)
+                          ->  Sort  (cost=0.00..431.17 rows=7 width=27) (actual time=1.942..1.943 rows=1 loops=1)
+                                Sort Key: (pg_catalog.sum((sum(o_totalprice))))
+                                Sort Method:  quicksort  Memory: 132kB
+                                ->  HashAggregate  (cost=0.00..431.17 rows=7 width=27) (actual time=1.921..1.930 rows=1 loops=1)
+                                      Group Key: p_brand
+                                      Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 1 of 32 buckets; total 0 expansions.
+
+                                      ->  Redistribute Motion 4:4  (slice1; segments: 4)  (cost=0.00..431.17 rows=7 width=27) (actual time=1.818..1.838 rows=3 loops=1)
+                                            Hash Key: p_brand
+                                            ->  Result  (cost=0.00..431.17 rows=7 width=27) (actual time=0.110..0.119 rows=3 loops=1)
+                                                  ->  HashAggregate  (cost=0.00..431.17 rows=7 width=27) (actual time=0.110..0.119 rows=3 loops=1)
+                                                        Group Key: p_brand
+                                                        Extra Text: (seg0)   Hash chain length 1.0 avg, 1 max, using 3 of 32 buckets; total 0 expansions.
+
+                                                        ->  Seq Scan on tcph_analytics_economy_brands  (cost=0.00..431.15 rows=124 width=24) (actual time=0.026..0.108 rows=7 loops=1)
+                                                              Filter: ((l_shipdate >= '1998-11-01 00:00:00'::timestamp without time zone) AND (l_shipdate < '1998-12-01 00:00:00+03'::timestamp with time zone))
+
+-- 2. За текущий и прошлый месяц (по дате отгрузки) вывести нарастающим итогом 
+-- количество L_QUANTITY и общую стоимость отгруженных товаров каждого бренда,
+-- а также количество уникальных поставщиков
+-- для оценки динамики внутри месяца
+-- В более реальном отчете вместо даты будет current_date. Но у нас такой сэмпл, что за этот промежуток нет данных
+
+select
+	P_NAME,
+    P_BRAND,
+    L_SHIPDATE,
+    S_SUPPKEY,
+    S_NAME,
+    O_TOTALPRICE,
+    L_QUANTITY,
+    sum(O_TOTALPRICE) OVER (PARTITION BY P_NAME, P_BRAND order by L_SHIPDATE) as total_brand_price,
+    sum(L_QUANTITY) OVER (PARTITION BY P_NAME, P_BRAND order by L_SHIPDATE) as total_brand_quantity,
+    count(distinct S_SUPPKEY) OVER (PARTITION BY P_NAME, P_BRAND) as supplier_brand_amount
+FROM tcph_analytics_economy_brands
+WHERE L_SHIPDATE >= date_trunc('month', to_date('1998-12-31', 'YYYY-MM-DD') - interval '1' month)
+  and L_SHIPDATE <= to_date('1998-12-31', 'YYYY-MM-DD')
+order by P_NAME, P_BRAND, L_SHIPDATE;
+-- Execution time: 2.947 ms
+-- План запроса:
+Gather Motion 4:1  (slice2; segments: 4)  (cost=79.37..79.59 rows=6 width=91) (actual time=2.123..2.138 rows=16 loops=1)
+  Merge Key: p_name, p_brand, l_shipdate
+  ->  WindowAgg  (cost=79.37..79.59 rows=2 width=91) (actual time=1.790..1.792 rows=4 loops=1)
+        Partition By: p_name, p_brand
+        ->  WindowAgg  (cost=79.37..79.50 rows=2 width=91) (actual time=1.766..1.768 rows=4 loops=1)
+              Partition By: p_name, p_brand
+              Order By: l_shipdate
+              ->  Sort  (cost=79.37..79.38 rows=2 width=91) (actual time=1.752..1.753 rows=4 loops=1)
+                    Sort Key: p_name, p_brand, l_shipdate
+                    Sort Method:  quicksort  Memory: 132kB
+                    ->  Redistribute Motion 4:4  (slice1; segments: 4)  (cost=0.00..79.30 rows=2 width=91) (actual time=1.663..1.723 rows=4 loops=1)
+                          Hash Key: p_name, p_brand
+                          ->  Seq Scan on tcph_analytics_economy_brands  (cost=0.00..79.20 rows=2 width=91) (actual time=0.019..0.088 rows=6 loops=1)
+                                Filter: ((l_shipdate >= '1998-11-01 00:00:00'::timestamp without time zone) AND (l_shipdate <= '1998-12-31'::date))
+
+
+-- 3. Общая стоимость и количество товаров каждого бренда, 
+-- отгруженная за текущий месяц, предыдущий и 2 месяца назад для оценки динамики по месяцам
+
+ with grouped_data as 
+    (
+        select P_BRAND, 
+               date_trunc('month', L_SHIPDATE) as mon,
+               count(L_QUANTITY) as total_quantity,
+               sum(O_TOTALPRICE) as total_price
+        from tcph_analytics_economy_brands
+        group by P_BRAND, date_trunc('month', L_SHIPDATE)   
+    ) 
+SELECT
+    P_BRAND,
+    mon,
+    total_quantity,
+    lag(total_quantity, 1) OVER (PARTITION BY P_BRAND ORDER BY mon) AS total_quantity_1,
+    lag(total_quantity, 2) OVER (PARTITION BY P_BRAND ORDER BY mon) AS total_quantity_2
+FROM grouped_data
+;
+
+--Execution time: 6.318 ms
+-- план запроса
+Gather Motion 4:1  (slice3; segments: 4)  (cost=0.00..433.17 rows=3080 width=40) (actual time=4.266..4.645 rows=631 loops=1)
+  ->  WindowAgg  (cost=0.00..432.76 rows=770 width=40) (actual time=4.224..4.408 rows=231 loops=1)
+        Partition By: p_brand
+        Order By: (date_trunc('month'::text, (l_shipdate)::timestamp with time zone))
+        ->  Sort  (cost=0.00..432.74 rows=770 width=27) (actual time=4.220..4.234 rows=231 loops=1)
+              Sort Key: p_brand, (date_trunc('month'::text, (l_shipdate)::timestamp with time zone))
+              Sort Method:  quicksort  Memory: 196kB
+              ->  Redistribute Motion 4:4  (slice2; segments: 4)  (cost=0.00..431.61 rows=770 width=27) (actual time=3.587..3.900 rows=231 loops=1)
+                    Hash Key: p_brand
+                    ->  Result  (cost=0.00..431.54 rows=770 width=27) (actual time=2.261..2.336 rows=172 loops=1)
+                          ->  HashAggregate  (cost=0.00..431.54 rows=770 width=27) (actual time=2.260..2.307 rows=172 loops=1)
+                                Group Key: p_brand, (date_trunc('month'::text, (l_shipdate)::timestamp with time zone))
+                                Extra Text: (seg2)   Hash chain length 2.8 avg, 7 max, using 62 of 64 buckets; total 1 expansions.
+
+                                ->  Redistribute Motion 4:4  (slice1; segments: 4)  (cost=0.00..431.34 rows=770 width=32) (actual time=1.127..1.609 rows=852 loops=1)
+                                      Hash Key: p_brand, (date_trunc('month'::text, (l_shipdate)::timestamp with time zone))
+                                      ->  Result  (cost=0.00..431.26 rows=770 width=32) (actual time=0.014..0.675 rows=804 loops=1)
+                                            ->  Result  (cost=0.00..431.26 rows=770 width=32) (actual time=0.014..0.585 rows=804 loops=1)
+                                                  ->  Seq Scan on tcph_analytics_economy_brands  (cost=0.00..431.12 rows=770 width=28) (actual time=0.005..0.193 rows=804 loops=1)
